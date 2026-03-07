@@ -1,24 +1,20 @@
 const axios = require('axios');
 const crypto = require('crypto');
 
-const {
-    AJAX_LOGIN, AJAX_PASSWORD, AJAX_X_API_KEY, HUB_ID, USER_ID, HOMEY_WEBHOOK_URL
-} = process.env;
+const { AJAX_LOGIN, AJAX_PASSWORD, AJAX_X_API_KEY, HOMEY_WEBHOOK_URL } = process.env;
 
 const API_BASE = "https://api.ajax.systems/api"; 
 let sessionToken = '';
-let isLoggingIn = false;
+let detectedUserId = '';
+let detectedHubId = '';
 
 function createHash(password) {
     return crypto.createHash('sha256').update(password).digest('hex');
 }
 
 async function login() {
-    if (isLoggingIn) return;
-    isLoggingIn = true;
-    
     try {
-        console.log("Sessie opbouwen bij Ajax...");
+        console.log("Stap 1: Inloggen...");
         const res = await axios.post(`${API_BASE}/login`, {
             login: AJAX_LOGIN,
             passwordHash: createHash(AJAX_PASSWORD)
@@ -27,27 +23,40 @@ async function login() {
         });
         
         sessionToken = res.data.sessionToken;
-        console.log("✅ Succesvol ingelogd.");
-        isLoggingIn = false;
+        detectedUserId = res.data.userId; // We pakken het ID uit de login response
+        console.log(`✅ Ingelogd. User ID: ${detectedUserId}`);
         
-        // Wacht 2 seconden voor de eerste check om de API rust te geven
-        setTimeout(checkStatus, 2000);
+        await discoverHub();
     } catch (err) {
-        console.error("❌ Login Fout:", err.response?.status, err.response?.data || err.message);
-        isLoggingIn = false;
-        setTimeout(login, 60000); 
+        console.error("❌ Login Fout:", err.response?.data || err.message);
+        setTimeout(login, 60000);
+    }
+}
+
+async function discoverHub() {
+    try {
+        console.log("Stap 2: Hubs zoeken voor deze gebruiker...");
+        const res = await axios.get(`${API_BASE}/user/${detectedUserId}/hubs`, {
+            headers: { 'X-Session-Token': sessionToken, 'X-Api-Key': AJAX_X_API_KEY }
+        });
+
+        if (res.data && res.data.length > 0) {
+            detectedHubId = res.data[0].id; // We pakken de eerste hub uit de lijst
+            console.log(`✅ Hub gevonden: ${res.data[0].name} (ID: ${detectedHubId})`);
+            checkStatus();
+        } else {
+            console.error("❌ FOUT: Dit account heeft geen toegang tot Hubs. Voeg dit account toe in de Ajax App!");
+            setTimeout(discoverHub, 60000);
+        }
+    } catch (err) {
+        console.error("❌ Discovery Fout:", err.response?.status, err.response?.data || err.message);
     }
 }
 
 async function checkStatus() {
-    if (!sessionToken) return;
-
     try {
-        const res = await axios.get(`${API_BASE}/user/${USER_ID}/hubs/${HUB_ID}`, {
-            headers: { 
-                'X-Session-Token': sessionToken,
-                'X-Api-Key': AJAX_X_API_KEY
-            }
+        const res = await axios.get(`${API_BASE}/user/${detectedUserId}/hubs/${detectedHubId}`, {
+            headers: { 'X-Session-Token': sessionToken, 'X-Api-Key': AJAX_X_API_KEY }
         });
 
         const hub = res.data;
@@ -59,23 +68,16 @@ async function checkStatus() {
             sabotage: hub.tamper ? "ALARM" : "OK"
         };
 
-        console.log(`Update verzonden: ${statusReport.alarm}`);
-        await axios.get(`${HOMEY_WEBHOOK_URL}?tag=${encodeURIComponent(JSON.stringify(statusReport))}`);
+        console.log(`🚀 Update naar Homey: ${statusReport.alarm} | Hub: ${statusReport.online}`);
+        
+        axios.get(`${HOMEY_WEBHOOK_URL}?tag=${encodeURIComponent(JSON.stringify(statusReport))}`)
+             .catch(() => console.error("Homey onbereikbaar"));
 
-        // Plan de volgende check
-        setTimeout(checkStatus, 30000);
-
+        setTimeout(checkStatus, 60000);
     } catch (err) {
-        const status = err.response?.status;
-        console.error(`❌ Status Check Error [${status}]:`, err.response?.data || err.message);
-
-        if (status === 401 || status === 403) {
-            console.log("Sessie niet geaccepteerd. Controleren van USER_ID of HUB_ID...");
-            sessionToken = '';
-            setTimeout(login, 5000);
-        } else {
-            setTimeout(checkStatus, 30000);
-        }
+        console.error("❌ Status Fout:", err.response?.status);
+        if (err.response?.status === 401) login();
+        else setTimeout(checkStatus, 60000);
     }
 }
 
