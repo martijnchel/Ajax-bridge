@@ -3,18 +3,21 @@ const crypto = require('crypto');
 
 const { AJAX_LOGIN, AJAX_PASSWORD, AJAX_X_API_KEY, HOMEY_WEBHOOK_URL } = process.env;
 
-const TARGET_HUB_ID = "002E5080"; // De specifieke hub voor de Gym
+const TARGET_HUB_ID = "002E5080"; 
 const API_BASE = "https://api.ajax.systems/api"; 
+
 let sessionToken = '';
+let refreshToken = '';
 let detectedUserId = '';
 
 function createHash(password) {
     return crypto.createHash('sha256').update(password).digest('hex');
 }
 
+// STAP 1: LOGIN & TOKEN MANAGEMENT
 async function login() {
     try {
-        console.log("Stap 1: Inloggen...");
+        console.log("Enterprise Login opstarten...");
         const res = await axios.post(`${API_BASE}/login`, {
             login: AJAX_LOGIN,
             passwordHash: createHash(AJAX_PASSWORD)
@@ -23,47 +26,48 @@ async function login() {
         });
         
         sessionToken = res.data.sessionToken;
+        refreshToken = res.data.refreshToken; // Bewaren voor de refresh later
         detectedUserId = res.data.userId; 
+        
         console.log(`✅ Ingelogd. User ID: ${detectedUserId}`);
         
-        await verifyHubAccess();
+        // Start de status monitor
+        checkStatus();
+        
+        // Plan een token refresh over 10 minuten (Ajax verloopt na 15 min)
+        setTimeout(refreshSession, 10 * 60 * 1000);
+        
     } catch (err) {
         console.error("❌ Login Fout:", err.response?.data || err.message);
         setTimeout(login, 60000);
     }
 }
 
-async function verifyHubAccess() {
+// STAP 2: REFRESH TOKEN (Voorkomt 'User not authorized' na 15 min)
+async function refreshSession() {
     try {
-        console.log(`Stap 2: Toegang tot Hub ${TARGET_HUB_ID} controleren...`);
-        const res = await axios.get(`${API_BASE}/user/${detectedUserId}/hubs`, {
-            headers: { 'X-Session-Token': sessionToken, 'X-Api-Key': AJAX_X_API_KEY }
+        console.log("Sessie verversen...");
+        const res = await axios.post(`${API_BASE}/refresh`, {
+            refreshToken: refreshToken
+        }, {
+            headers: { 'X-Api-Key': AJAX_X_API_KEY }
         });
-
-        const hubs = Array.isArray(res.data) ? res.data : (res.data.hubs || res.data.data || []);
         
-        // Zoek specifiek naar jouw Gym Hub ID
-        const myHub = hubs.find(h => (h.id === TARGET_HUB_ID || h.hubId === TARGET_HUB_ID));
-
-        if (myHub) {
-            console.log(`✅ Hub gevonden en geautoriseerd: ${myHub.name || 'Gym Hub'}`);
-            checkStatus();
-        } else {
-            console.error(`❌ FOUT: Hub ${TARGET_HUB_ID} niet gevonden in de lijst van dit account!`);
-            console.log("Beschikbare ID's in dit account:", hubs.map(h => h.id || h.hubId));
-            // We proberen het toch met het opgegeven ID, voor het geval de lijst-API beperkt is
-            checkStatus(); 
-        }
+        sessionToken = res.data.sessionToken;
+        refreshToken = res.data.refreshToken;
+        console.log("✅ Sessie succesvol verlengd.");
+        setTimeout(refreshSession, 10 * 60 * 1000);
     } catch (err) {
-        console.error("❌ Discovery Fout:", err.response?.status, JSON.stringify(err.response?.data));
-        // Forceer start als discovery faalt maar login gelukt is
-        checkStatus();
+        console.error("❌ Refresh mislukt, opnieuw inloggen...");
+        login();
     }
 }
 
+// STAP 3: STATUS MONITORING
 async function checkStatus() {
+    if (!sessionToken) return;
+
     try {
-        // We gebruiken nu geforceerd het juiste TARGET_HUB_ID
         const res = await axios.get(`${API_BASE}/user/${detectedUserId}/hubs/${TARGET_HUB_ID}`, {
             headers: { 
                 'X-Session-Token': sessionToken, 
@@ -72,26 +76,40 @@ async function checkStatus() {
         });
 
         const hub = res.data;
+
+        // Volgens de Enterprise API docs: we kijken specifiek naar armedState
+        // Mocht dit 'UNKNOWN' blijven, dan mappen we de interne Ajax codes.
+        let alarmStatus = hub.armedState;
         
+        if (!alarmStatus || alarmStatus === "UNKNOWN") {
+            // Backup mapping voor verschillende Hub types
+            alarmStatus = hub.status?.armedState || hub.state || "DISARMED";
+        }
+
         const statusReport = {
-            alarm: hub.armedState || "UNKNOWN",
+            alarm: alarmStatus,
             online: hub.online ? "JA" : "NEE",
             brand: hub.fireAlarm ? "BRAND!" : "OK",
             co: hub.coAlarm ? "GAS!" : "OK",
             sabotage: hub.tamper ? "ALARM" : "OK"
         };
 
-        console.log(`🚀 Update naar Homey [Hub ${TARGET_HUB_ID}]: ${statusReport.alarm}`);
+        console.log(`🚀 [${new Date().toLocaleTimeString()}] Hub ${TARGET_HUB_ID}: ${statusReport.alarm}`);
         
+        // Stuur naar Homey
         axios.get(`${HOMEY_WEBHOOK_URL}?tag=${encodeURIComponent(JSON.stringify(statusReport))}`)
              .catch(() => {});
 
-        setTimeout(checkStatus, 60000);
     } catch (err) {
-        console.error(`❌ Status Fout [${err.response?.status}]:`, err.response?.data);
-        if (err.response?.status === 401) login();
-        else setTimeout(checkStatus, 60000);
+        console.error(`❌ Status Check Fout:`, err.response?.status);
+        if (err.response?.status === 401) {
+            login(); // Direct herinloggen bij autorisatiefout
+            return;
+        }
     }
+    
+    // Polling interval: 60 seconden
+    setTimeout(checkStatus, 60000);
 }
 
 login();
