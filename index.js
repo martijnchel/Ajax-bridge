@@ -23,7 +23,7 @@ async function login() {
         });
         
         sessionToken = res.data.sessionToken;
-        detectedUserId = res.data.userId; // We pakken het ID uit de login response
+        detectedUserId = res.data.userId; 
         console.log(`✅ Ingelogd. User ID: ${detectedUserId}`);
         
         await discoverHub();
@@ -35,47 +35,64 @@ async function login() {
 
 async function discoverHub() {
     try {
-        console.log("Stap 2: Hubs zoeken voor deze gebruiker...");
+        console.log("Stap 2: Hubs zoeken...");
         const res = await axios.get(`${API_BASE}/user/${detectedUserId}/hubs`, {
             headers: { 'X-Session-Token': sessionToken, 'X-Api-Key': AJAX_X_API_KEY }
         });
 
-        if (res.data && res.data.length > 0) {
-            detectedHubId = res.data[0].id; // We pakken de eerste hub uit de lijst
-            console.log(`✅ Hub gevonden: ${res.data[0].name} (ID: ${detectedHubId})`);
-            checkStatus();
+        // Ajax geeft soms een array direct, of een object met een 'hubs' of 'data' veld
+        const hubs = Array.isArray(res.data) ? res.data : (res.data.hubs || res.data.data || []);
+
+        if (hubs.length > 0) {
+            // We zoeken naar 'id' of 'hubId'
+            const firstHub = hubs[0];
+            detectedHubId = firstHub.id || firstHub.hubId;
+            const hubName = firstHub.name || "Naamloze Hub";
+
+            if (detectedHubId) {
+                console.log(`✅ Hub gevonden: ${hubName} (ID: ${detectedHubId})`);
+                checkStatus();
+            } else {
+                console.error("❌ Hub gevonden, maar geen ID gevonden in data:", firstHub);
+            }
         } else {
-            console.error("❌ FOUT: Dit account heeft geen toegang tot Hubs. Voeg dit account toe in de Ajax App!");
+            console.error("❌ Geen hubs gevonden voor dit account. Check de Ajax App rechten.");
             setTimeout(discoverHub, 60000);
         }
     } catch (err) {
-        console.error("❌ Discovery Fout:", err.response?.status, err.response?.data || err.message);
+        console.error("❌ Discovery Fout:", err.response?.status, JSON.stringify(err.response?.data));
     }
 }
 
 async function checkStatus() {
     try {
         const res = await axios.get(`${API_BASE}/user/${detectedUserId}/hubs/${detectedHubId}`, {
-            headers: { 'X-Session-Token': sessionToken, 'X-Api-Key': AJAX_X_API_KEY }
+            headers: { 
+                'X-Session-Token': sessionToken, 
+                'X-Api-Key': AJAX_X_API_KEY 
+            }
         });
 
         const hub = res.data;
+        
+        // De 422 error kwam waarschijnlijk door een verkeerd Hub-ID pad. 
+        // Nu we het juiste ID hebben, bouwen we het rapport:
         const statusReport = {
-            alarm: hub.armedState,
+            alarm: hub.armedState || "UNKNOWN",
             online: hub.online ? "JA" : "NEE",
             brand: hub.fireAlarm ? "BRAND!" : "OK",
             co: hub.coAlarm ? "GAS!" : "OK",
             sabotage: hub.tamper ? "ALARM" : "OK"
         };
 
-        console.log(`🚀 Update naar Homey: ${statusReport.alarm} | Hub: ${statusReport.online}`);
+        console.log(`🚀 Update naar Homey: ${statusReport.alarm}`);
         
         axios.get(`${HOMEY_WEBHOOK_URL}?tag=${encodeURIComponent(JSON.stringify(statusReport))}`)
-             .catch(() => console.error("Homey onbereikbaar"));
+             .catch(() => {});
 
         setTimeout(checkStatus, 60000);
     } catch (err) {
-        console.error("❌ Status Fout:", err.response?.status);
+        console.error(`❌ Status Fout [${err.response?.status}]:`, err.response?.data);
         if (err.response?.status === 401) login();
         else setTimeout(checkStatus, 60000);
     }
