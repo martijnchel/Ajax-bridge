@@ -1,5 +1,7 @@
 const axios = require('axios');
+const crypto = require('crypto');
 
+// Variabelen uit Railway Environment
 const {
     AJAX_LOGIN,
     AJAX_PASSWORD,
@@ -9,32 +11,35 @@ const {
     HOMEY_WEBHOOK_URL
 } = process.env;
 
-// Exacte Base URL volgens jouw info
 const API_BASE = "https://api.ajax.systems/api"; 
-
 let sessionToken = '';
+
+// Functie om het wachtwoord te hashen naar SHA-256 (vereist door Ajax)
+function createHash(password) {
+    return crypto.createHash('sha256').update(password).digest('hex');
+}
 
 async function login() {
     try {
-        console.log("Poging inloggen op:", `${API_BASE}/login`);
+        console.log("Poging inloggen bij Ajax...");
+        const passwordHash = createHash(AJAX_PASSWORD);
         
         const res = await axios.post(`${API_BASE}/login`, {
             login: AJAX_LOGIN,
-            password: AJAX_PASSWORD
+            passwordHash: passwordHash
         }, {
             headers: { 
                 'X-Api-Key': AJAX_X_API_KEY,
-                'Content-Type': 'application/json',
-                'Accept': 'application/json'
+                'Content-Type': 'application/json'
             }
         });
         
         sessionToken = res.data.sessionToken;
-        console.log("✅ Succesvol ingelogd bij Ajax Enterprise.");
+        console.log("✅ Succesvol ingelogd bij Ajax.");
         checkStatus();
     } catch (err) {
-        console.error("❌ Login Error:", err.response?.status, err.response?.data || err.message);
-        // Bij een 404 hier: probeer in de URL 'https://api.ajax.systems/api/v1/login' (sommige accounts vereisen dit alsnog)
+        console.error("❌ Login Error:", err.response?.status, JSON.stringify(err.response?.data, null, 2));
+        // Bij fout: probeer over 60 seconden opnieuw
         setTimeout(login, 60000); 
     }
 }
@@ -43,7 +48,7 @@ async function checkStatus() {
     if (!sessionToken) return login();
 
     try {
-        // We proberen de status van de Hub op te halen
+        // Haal gedetailleerde Hub informatie op
         const res = await axios.get(`${API_BASE}/user/${USER_ID}/hubs/${HUB_ID}`, {
             headers: { 
                 'X-Session-Token': sessionToken,
@@ -52,29 +57,40 @@ async function checkStatus() {
         });
 
         const hub = res.data;
+
+        // Vertaling naar begrijpelijke status voor Homey
         const statusReport = {
-            alarm: hub.armedState,
+            alarm: hub.armedState,                  // ARMED / DISARMED
             online: hub.online ? "JA" : "NEE",
             brand: hub.fireAlarm ? "BRAND!" : "OK",
             co: hub.coAlarm ? "GAS!" : "OK",
             sabotage: hub.tamper ? "ALARM" : "OK"
         };
 
-        console.log("Status update naar Homey:", statusReport.alarm);
+        console.log(`Update verzonden: Alarm=${statusReport.alarm}, Online=${statusReport.online}`);
 
-        // Webhook naar Homey
+        // Verstuur data naar Homey
         await axios.get(`${HOMEY_WEBHOOK_URL}?tag=${encodeURIComponent(JSON.stringify(statusReport))}`);
 
     } catch (err) {
         if (err.response?.status === 401 || err.response?.status === 403) {
-            console.log("Sessie ongeldig, herinloggen...");
+            console.log("Sessie verlopen, herinloggen...");
             sessionToken = '';
+            login();
         } else {
-            console.error("❌ Status Check Error:", err.response?.status, err.response?.data || err.message);
+            console.error("❌ Status Check Error:", err.response?.status, err.message);
+            // Probeer het over 30 seconden gewoon opnieuw
+            setTimeout(checkStatus, 30000);
         }
     }
     
+    // Polling interval (30 seconden is veilig voor de API limieten)
     setTimeout(checkStatus, 30000);
 }
 
-login();
+// Start het proces
+if (!AJAX_LOGIN || !AJAX_PASSWORD || !AJAX_X_API_KEY) {
+    console.error("❌ FOUT: Niet alle variabelen zijn ingesteld in Railway!");
+} else {
+    login();
+}
