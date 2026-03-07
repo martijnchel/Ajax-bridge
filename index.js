@@ -3,10 +3,10 @@ const crypto = require('crypto');
 
 const { AJAX_LOGIN, AJAX_PASSWORD, AJAX_X_API_KEY, HOMEY_WEBHOOK_URL } = process.env;
 
+const TARGET_HUB_ID = "002E5080"; // De specifieke hub voor de Gym
 const API_BASE = "https://api.ajax.systems/api"; 
 let sessionToken = '';
 let detectedUserId = '';
-let detectedHubId = '';
 
 function createHash(password) {
     return crypto.createHash('sha256').update(password).digest('hex');
@@ -26,47 +26,45 @@ async function login() {
         detectedUserId = res.data.userId; 
         console.log(`✅ Ingelogd. User ID: ${detectedUserId}`);
         
-        await discoverHub();
+        await verifyHubAccess();
     } catch (err) {
         console.error("❌ Login Fout:", err.response?.data || err.message);
         setTimeout(login, 60000);
     }
 }
 
-async function discoverHub() {
+async function verifyHubAccess() {
     try {
-        console.log("Stap 2: Hubs zoeken...");
+        console.log(`Stap 2: Toegang tot Hub ${TARGET_HUB_ID} controleren...`);
         const res = await axios.get(`${API_BASE}/user/${detectedUserId}/hubs`, {
             headers: { 'X-Session-Token': sessionToken, 'X-Api-Key': AJAX_X_API_KEY }
         });
 
-        // Ajax geeft soms een array direct, of een object met een 'hubs' of 'data' veld
         const hubs = Array.isArray(res.data) ? res.data : (res.data.hubs || res.data.data || []);
+        
+        // Zoek specifiek naar jouw Gym Hub ID
+        const myHub = hubs.find(h => (h.id === TARGET_HUB_ID || h.hubId === TARGET_HUB_ID));
 
-        if (hubs.length > 0) {
-            // We zoeken naar 'id' of 'hubId'
-            const firstHub = hubs[0];
-            detectedHubId = firstHub.id || firstHub.hubId;
-            const hubName = firstHub.name || "Naamloze Hub";
-
-            if (detectedHubId) {
-                console.log(`✅ Hub gevonden: ${hubName} (ID: ${detectedHubId})`);
-                checkStatus();
-            } else {
-                console.error("❌ Hub gevonden, maar geen ID gevonden in data:", firstHub);
-            }
+        if (myHub) {
+            console.log(`✅ Hub gevonden en geautoriseerd: ${myHub.name || 'Gym Hub'}`);
+            checkStatus();
         } else {
-            console.error("❌ Geen hubs gevonden voor dit account. Check de Ajax App rechten.");
-            setTimeout(discoverHub, 60000);
+            console.error(`❌ FOUT: Hub ${TARGET_HUB_ID} niet gevonden in de lijst van dit account!`);
+            console.log("Beschikbare ID's in dit account:", hubs.map(h => h.id || h.hubId));
+            // We proberen het toch met het opgegeven ID, voor het geval de lijst-API beperkt is
+            checkStatus(); 
         }
     } catch (err) {
         console.error("❌ Discovery Fout:", err.response?.status, JSON.stringify(err.response?.data));
+        // Forceer start als discovery faalt maar login gelukt is
+        checkStatus();
     }
 }
 
 async function checkStatus() {
     try {
-        const res = await axios.get(`${API_BASE}/user/${detectedUserId}/hubs/${detectedHubId}`, {
+        // We gebruiken nu geforceerd het juiste TARGET_HUB_ID
+        const res = await axios.get(`${API_BASE}/user/${detectedUserId}/hubs/${TARGET_HUB_ID}`, {
             headers: { 
                 'X-Session-Token': sessionToken, 
                 'X-Api-Key': AJAX_X_API_KEY 
@@ -75,8 +73,6 @@ async function checkStatus() {
 
         const hub = res.data;
         
-        // De 422 error kwam waarschijnlijk door een verkeerd Hub-ID pad. 
-        // Nu we het juiste ID hebben, bouwen we het rapport:
         const statusReport = {
             alarm: hub.armedState || "UNKNOWN",
             online: hub.online ? "JA" : "NEE",
@@ -85,7 +81,7 @@ async function checkStatus() {
             sabotage: hub.tamper ? "ALARM" : "OK"
         };
 
-        console.log(`🚀 Update naar Homey: ${statusReport.alarm}`);
+        console.log(`🚀 Update naar Homey [Hub ${TARGET_HUB_ID}]: ${statusReport.alarm}`);
         
         axios.get(`${HOMEY_WEBHOOK_URL}?tag=${encodeURIComponent(JSON.stringify(statusReport))}`)
              .catch(() => {});
