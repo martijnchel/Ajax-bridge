@@ -1,25 +1,68 @@
+const axios = require('axios');
+const crypto = require('crypto');
+
+console.log("Systeem: Script wordt geladen...");
+
+const { AJAX_LOGIN, AJAX_PASSWORD, AJAX_X_API_KEY, HOMEY_WEBHOOK_URL } = process.env;
+
+// Check of de variabelen er zijn
+if (!AJAX_LOGIN || !AJAX_PASSWORD || !AJAX_X_API_KEY) {
+    console.error("❌ FOUT: Omgevingsvariabelen ontbreken in Railway!");
+    process.exit(1);
+}
+
+const TARGET_HUB_ID = "002E5080"; 
+const API_BASE = "https://api.ajax.systems/api"; 
+
+let sessionToken = '';
+let refreshToken = '';
+let detectedUserId = '';
+
+function createHash(password) {
+    return crypto.createHash('sha256').update(password).digest('hex');
+}
+
+async function login() {
+    try {
+        console.log("Stap 1: Inloggen bij Ajax...");
+        const res = await axios.post(`${API_BASE}/login`, {
+            login: AJAX_LOGIN,
+            passwordHash: createHash(AJAX_PASSWORD)
+        }, {
+            headers: { 'X-Api-Key': AJAX_X_API_KEY, 'Content-Type': 'application/json' }
+        });
+        
+        sessionToken = res.data.sessionToken;
+        refreshToken = res.data.refreshToken;
+        detectedUserId = res.data.userId; 
+        
+        console.log(`✅ Ingelogd. User ID: ${detectedUserId}`);
+        checkStatus();
+    } catch (err) {
+        console.error("❌ Login Fout:", err.response?.data || err.message);
+        setTimeout(login, 60000);
+    }
+}
+
 async function checkStatus() {
     if (!sessionToken) return;
     try {
+        console.log("Stap 2: Status ophalen...");
         const res = await axios.get(`${API_BASE}/user/${detectedUserId}/hubs/${TARGET_HUB_ID}`, {
             headers: { 'X-Session-Token': sessionToken, 'X-Api-Key': AJAX_X_API_KEY }
         });
 
         const hub = res.data;
 
-        // 1. Slimme check voor Connectiviteit
-        // We checken hubConnectionStatus, online, en connectionState
-        let isOnline = (hub.online === true || hub.hubConnectionStatus === 'ONLINE' || hub.connectionState === 'ONLINE');
+        // Slimme status detectie voor Connectiviteit
+        const isOnline = (hub.online === true || hub.hubConnectionStatus === 'ONLINE' || hub.connectionState === 'ONLINE');
 
-        // 2. Slimme check voor Alarm Status
-        // We kijken naar armedState, maar als die DISARMED is terwijl er een deeltraject actief is, pakken we die.
+        // Slimme status detectie voor Alarm (Nachtstand/Deeltraject overschrijft DISARMED)
         let currentAlarm = hub.armedState || "DISARMED";
-        
-        // Als de hoofstatus DISARMED is, maar de hub geeft aan dat er groepen aan staan of nachtstand:
         if (currentAlarm === "DISARMED") {
             if (hub.nightMode === true || hub.nightMode === 'ARMED') {
                 currentAlarm = "NIGHT_MODE";
-            } else if (hub.groupState === 'PARTIAL' || hub.partial === true) {
+            } else if (hub.partial === true) {
                 currentAlarm = "PARTIAL";
             }
         }
@@ -32,15 +75,11 @@ async function checkStatus() {
             sabotage: hub.tamperedFront || "TAMPERED_FRONT_OK"
         };
 
-        console.log(`🚀 Update verzonden: ${statusReport.alarm} | Hub: ${statusReport.online}`);
+        console.log(`🚀 VERZONDEN: [${statusReport.alarm}] [Hub: ${statusReport.online}]`);
         
-        // Als het nog steeds niet klopt, loggen we de hele bups voor analyse
-        if (statusReport.alarm === "DISARMED" || statusReport.online === "OFFLINE") {
-            console.log("DEBUG: Volledige Hub Data:", JSON.stringify(hub));
-        }
-
+        // Naar Homey sturen
         axios.get(`${HOMEY_WEBHOOK_URL}?tag=${encodeURIComponent(JSON.stringify(statusReport))}`)
-             .catch(() => {});
+             .catch(e => console.error("Homey Webhook Error"));
 
         setTimeout(checkStatus, 60000);
     } catch (err) {
@@ -49,3 +88,6 @@ async function checkStatus() {
         else setTimeout(checkStatus, 60000);
     }
 }
+
+// Start het proces
+login();
