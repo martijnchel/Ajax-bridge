@@ -14,7 +14,7 @@ function createHash(password) {
 
 async function login() {
     try {
-        console.log("Inloggen...");
+        console.log("Inloggen bij Ajax Cloud...");
         const res = await axios.post(`${API_BASE}/login`, {
             login: AJAX_LOGIN,
             passwordHash: createHash(AJAX_PASSWORD)
@@ -23,7 +23,7 @@ async function login() {
         });
         sessionToken = res.data.sessionToken;
         detectedUserId = res.data.userId; 
-        console.log("✅ Ingelogd.");
+        console.log("✅ Verbinding gemaakt.");
         checkStatus();
     } catch (err) {
         console.error("❌ Login Fout:", err.message);
@@ -39,23 +39,43 @@ async function checkStatus() {
 
         const hub = res.data;
 
-        // --- HIER GEBEURT DE MAGIE: DUMP ALLES ---
-        console.log("--- START DEBUG DATA ---");
-        console.log(JSON.stringify(hub, null, 2));
-        console.log("--- EINDE DEBUG DATA ---");
+        // 1. Alarm status (NIGHT_MODE, ARMED, DISARMED)
+        const currentAlarm = hub.state || "DISARMED";
 
-        // Stuur voor nu de basis door naar Homey (ook al klopt het nog niet)
-        const report = {
-            alarm: hub.armedState || "UNKNOWN",
-            online: hub.online ? "ONLINE" : "OFFLINE"
+        // 2. Online status (Check of kanalen actief zijn)
+        const isOnline = (hub.activeChannels && hub.activeChannels.length > 0);
+
+        // 3. Sabotage (Tamper) - Check of er storingen/malfunctions zijn
+        const isTampered = (hub.hubMalfunctions && hub.hubMalfunctions.length > 0);
+
+        // 4. Brand & CO (Check fireAlarm object uit jouw debug data)
+        // We mappen dit naar de Enums die je Homey script begrijpt
+        const smokeStatus = (hub.fireAlarm && hub.fireAlarm.state === "ALARM") 
+            ? "SMOKE_ALARM_DETECTED" 
+            : "SMOKE_ALARM_NOT_DETECTED";
+
+        const coStatus = (hub.coAlarm && hub.coAlarm.state === "ALARM")
+            ? "CO_ALARM_DETECTED"
+            : "CO_ALARM_NOT_DETECTED";
+
+        const statusReport = {
+            alarm: currentAlarm,
+            online: isOnline ? "ONLINE" : "OFFLINE",
+            brand: smokeStatus,
+            co: coStatus,
+            sabotage: isTampered ? "TAMPERED_FRONT_OPEN" : "TAMPERED_FRONT_OK"
         };
+
+        console.log(`🚀 VERZONDEN: [${statusReport.alarm}] [Online: ${statusReport.online}] [Brand: ${isTampered ? 'SABOTAGE!' : 'OK'}]`);
         
-        axios.get(`${HOMEY_WEBHOOK_URL}?tag=${encodeURIComponent(JSON.stringify(report))}`).catch(() => {});
-        
+        axios.get(`${HOMEY_WEBHOOK_URL}?tag=${encodeURIComponent(JSON.stringify(statusReport))}`)
+             .catch(() => {});
+
         setTimeout(checkStatus, 60000);
     } catch (err) {
-        console.error("Fout:", err.message);
-        setTimeout(checkStatus, 60000);
+        console.error("Fout bij ophalen status:", err.message);
+        if (err.response?.status === 401) login();
+        else setTimeout(checkStatus, 60000);
     }
 }
 
