@@ -7,7 +7,8 @@ const API_BASE = "https://api.ajax.systems/api";
 
 let sessionToken = '';
 let detectedUserId = '';
-let lastStatusString = ''; // Hier onthouden we de vorige status
+let lastStatusString = ''; 
+let lastFullUpdateTime = 0; // Tijdstip van de laatste verzending
 
 function createHash(password) {
     return crypto.createHash('sha256').update(password).digest('hex');
@@ -24,7 +25,7 @@ async function login() {
         });
         sessionToken = res.data.sessionToken;
         detectedUserId = res.data.userId; 
-        console.log("✅ Verbinding gemaakt. Monitoring gestart...");
+        console.log("✅ Verbinding gemaakt. Monitoring gestart (5s check + 1u heartbeat)...");
         checkStatus();
     } catch (err) {
         console.error("❌ Login Fout:", err.message);
@@ -48,17 +49,24 @@ async function checkStatus() {
         };
 
         const currentStatusString = JSON.stringify(statusReport);
+        const currentTime = Date.now();
+        const oneHourInMs = 60 * 60 * 1000;
 
-        // CHECK: Is er iets veranderd sinds de vorige keer?
-        if (currentStatusString !== lastStatusString) {
-            console.log(`⚠️ WIJZIGING GEDETECTEERD: [${statusReport.alarm}] - Verzenden naar Homey...`);
+        // VERZENDEN ALS: 
+        // 1. Er iets is veranderd
+        // 2. OF het is meer dan een uur geleden (heartbeat)
+        if (currentStatusString !== lastStatusString || (currentTime - lastFullUpdateTime) > oneHourInMs) {
+            
+            const isHeartbeat = (currentStatusString === lastStatusString);
+            console.log(isHeartbeat ? `\n💓 HEARTBEAT: Status ongewijzigd, geforceerde update...` : `\n⚠️ WIJZIGING: [${statusReport.alarm}] - Verzenden naar Homey...`);
             
             await axios.get(`${HOMEY_WEBHOOK_URL}?tag=${encodeURIComponent(currentStatusString)}`)
                  .catch((e) => console.error("Webhook verzenden mislukt:", e.message));
 
-            lastStatusString = currentStatusString; // Update het geheugen
+            lastStatusString = currentStatusString;
+            lastFullUpdateTime = currentTime;
         } else {
-            // Niets veranderd, we loggen alleen een stipje in Railway om te laten zien dat we nog leven
+            // Geen wijziging: toon een puntje in de logs
             process.stdout.write("."); 
         }
 
