@@ -7,6 +7,7 @@ const API_BASE = "https://api.ajax.systems/api";
 
 let sessionToken = '';
 let detectedUserId = '';
+let lastStatusString = ''; // Hier onthouden we de vorige status
 
 function createHash(password) {
     return crypto.createHash('sha256').update(password).digest('hex');
@@ -23,7 +24,7 @@ async function login() {
         });
         sessionToken = res.data.sessionToken;
         detectedUserId = res.data.userId; 
-        console.log("✅ Verbinding gemaakt. Start snelle status-check (5s)...");
+        console.log("✅ Verbinding gemaakt. Monitoring gestart...");
         checkStatus();
     } catch (err) {
         console.error("❌ Login Fout:", err.message);
@@ -46,21 +47,26 @@ async function checkStatus() {
             sabotage: (hub.hubMalfunctions && hub.hubMalfunctions.length > 0) ? "TAMPERED_FRONT_OPEN" : "TAMPERED_FRONT_OK"
         };
 
-        // Alleen loggen en sturen als er iets veranderd is of elke 30 seconden als hartslag
-        console.log(`🚀 Status Check: [${statusReport.alarm}]`);
-        
-        await axios.get(`${HOMEY_WEBHOOK_URL}?tag=${encodeURIComponent(JSON.stringify(statusReport))}`)
-             .catch(() => {});
+        const currentStatusString = JSON.stringify(statusReport);
 
-        // We zetten de check op 5 seconden voor een "realtime" gevoel
+        // CHECK: Is er iets veranderd sinds de vorige keer?
+        if (currentStatusString !== lastStatusString) {
+            console.log(`⚠️ WIJZIGING GEDETECTEERD: [${statusReport.alarm}] - Verzenden naar Homey...`);
+            
+            await axios.get(`${HOMEY_WEBHOOK_URL}?tag=${encodeURIComponent(currentStatusString)}`)
+                 .catch((e) => console.error("Webhook verzenden mislukt:", e.message));
+
+            lastStatusString = currentStatusString; // Update het geheugen
+        } else {
+            // Niets veranderd, we loggen alleen een stipje in Railway om te laten zien dat we nog leven
+            process.stdout.write("."); 
+        }
+
         setTimeout(checkStatus, 5000); 
     } catch (err) {
-        console.error("Fout bij ophalen status:", err.message);
-        if (err.response?.status === 401) {
-            login();
-        } else {
-            setTimeout(checkStatus, 10000);
-        }
+        console.error("\nFout bij ophalen status:", err.message);
+        if (err.response?.status === 401) login();
+        else setTimeout(checkStatus, 10000);
     }
 }
 
