@@ -59,3 +59,12 @@ async function checkStatus() {
             lastStatusString = currentStatusString;
             lastFullUpdateTime = currentTime;
         }
+        setTimeout(checkStatus, 5000); 
+    } catch (err) {
+        console.error("\nFout bij ophalen status:", err.message);
+        if (err.response?.status === 401) login();
+        else setTimeout(checkStatus, 10000);
+    }
+}
+
+login();
