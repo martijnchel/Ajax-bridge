@@ -40,8 +40,15 @@ async function checkStatus() {
         });
 
         const hub = res.data;
+        
+        // Controleer of er een inbraakalarm gaande is
+        let currentAlarmState = hub.state || "DISARMED";
+        if (hub.state === "ALARM" || (hub.alarms && hub.alarms.length > 0)) {
+            currentAlarmState = "ALARM";
+        }
+
         const statusReport = {
-            alarm: hub.state || "DISARMED",
+            alarm: currentAlarmState,
             online: (hub.activeChannels && hub.activeChannels.length > 0) ? "ONLINE" : "OFFLINE",
             brand: (hub.fireAlarm && hub.fireAlarm.state === "ALARM") ? "SMOKE_ALARM_DETECTED" : "SMOKE_ALARM_NOT_DETECTED",
             co: (hub.coAlarm && hub.coAlarm.state === "ALARM") ? "CO_ALARM_DETECTED" : "CO_ALARM_NOT_DETECTED",
